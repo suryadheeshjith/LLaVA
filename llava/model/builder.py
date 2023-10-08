@@ -18,13 +18,15 @@ import warnings
 import shutil
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+from accelerate import infer_auto_device_map, init_empty_weights
 import torch
 from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
-def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda"):
-    kwargs = {"device_map": device_map}
+def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=True, device_map="auto"):
+
+    kwargs = {"offload_folder": "offload", "offload_state_dict": True}
 
     if load_8bit:
         kwargs['load_in_8bit'] = True
@@ -34,7 +36,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type='nf4'
+            bnb_4bit_quant_type='nf4',
+            llm_int8_enable_fp32_cpu_offload=True
         )
     else:
         kwargs['torch_dtype'] = torch.float16
@@ -99,8 +102,33 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
                 model = LlavaMPTForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
             else:
+                print("Hello")
+                config = AutoConfig.from_pretrained(model_path)
+                with init_empty_weights():
+                    model = AutoModelForCausalLM.from_config(config)
+                device_map = infer_auto_device_map(model)
+                # device_map['model.layers.36.self_attn'] = 'cpu'
+                device_map['model.layers.15'] = 'disk'
+                device_map['model.layers.16'] = 'disk'
+                device_map['model.layers.17'] = 'disk'
+
+                device_map['model.layers.12'] = 'disk'
+                device_map['model.layers.13'] = 'disk'
+                device_map['model.layers.14'] = 'disk'
+
+                device_map['model.layers.10.mlp.up_proj'] = 'disk'
+                device_map['model.layers.10.mlp.down_proj'] = 'disk'
+                device_map['model.layers.10.mlp.act_fn'] = 'disk'
+                device_map['model.layers.10.input_layernorm'] = 'disk'
+                device_map['model.layers.10.post_attention_layernorm'] = 'disk'
+
+                print(device_map)
+              
+
+                kwargs["device_map"]=device_map
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-                model = LlavaLlamaForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+                model = AutoModelForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+
     else:
         # Load language model
         if model_base is not None:
@@ -123,6 +151,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
                 model = AutoModelForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
+
     image_processor = None
 
     if 'llava' in model_name.lower():
@@ -137,7 +166,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         vision_tower = model.get_vision_tower()
         if not vision_tower.is_loaded:
             vision_tower.load_model()
-        vision_tower.to(device=device, dtype=torch.float16)
+        vision_tower.to(device='cuda', dtype=torch.float16)
         image_processor = vision_tower.image_processor
 
     if hasattr(model.config, "max_sequence_length"):
